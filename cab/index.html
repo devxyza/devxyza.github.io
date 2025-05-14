@@ -90,7 +90,7 @@
 
       const raw = await nkhtml.import(`./${section}.nkhtml`);
       const html = nkhtml.toHtml(raw, {
-        h: { color: "#228822" },
+        h: { color: "#228822", fontSize: "32px" },
         t: { fontSize: "16px" },
         i: { maxWidth: "100%", margin: "10px auto", display: "block" }
       });

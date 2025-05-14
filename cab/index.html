@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Campaña Anti Basura</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+    }
+
+    .rowtop {
+      display: flex;
+      flex-direction: row;
+      align-items: stretch;
+      width: 100%;
+    }
+
+    .col {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .navitem {
+      color: white;
+      flex: 1;
+      background-color: #343434;
+      text-align: center;
+      cursor: pointer;
+      padding: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .navitem:hover {
+      background-color: #555555;
+    }
+
+    #content {
+      padding: 20px;
+      text-align: center;
+    }
+
+    h1 {
+      margin: 20px 0;
+    }
+  </style>
+  <script>
+    const nkhtml = {
+      async import(url) {
+        try {
+          const res = await fetch(url);
+          if (!res.ok) throw new Error(`Failed to load ${url}`);
+          return await res.text();
+        } catch (err) {
+          console.error(err);
+          return '';
+        }
+      },
+
+      toHtml(text, styles = {}) {
+        const escapeHtml = (s) =>
+          s.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+        const styleFor = (tag) => {
+          const rule = styles[tag] || {};
+          return Object.entries(rule)
+            .map(([k, v]) => `${k}:${v}`)
+            .join("; ");
+        };
+
+        return text
+          .replace(/<h>([\s\S]*?)\/<h>/g, (_, t) =>
+            `<h1 style="${styleFor('h')}">${escapeHtml(t.trim())}</h1>`
+          )
+          .replace(/<t>([\s\S]*?)<\/t>/g, (_, t) =>
+            `<p style="${styleFor('t')}">${escapeHtml(t.trim())}</p>`
+          )
+          .replace(/<i>([\s\S]*?)\n([\s\S]*?)<\/i>/g, (_, src, alt) =>
+            `<img src="${src.trim()}" alt="${escapeHtml(alt.trim())}" style="${styleFor('i')}" />`
+          );
+      }
+    };
+
+    async function loadSection(section) {
+      const contentDiv = document.getElementById('content');
+      contentDiv.innerHTML = '<p>Cargando...</p>';
+
+      const raw = await nkhtml.import(`./${section}.nkhtml`);
+      const html = nkhtml.toHtml(raw, {
+        h: { color: "#228822" },
+        t: { fontSize: "16px" },
+        i: { maxWidth: "100%", margin: "10px auto", display: "block" }
+      });
+
+      contentDiv.innerHTML = html || '<p>Lo siento, no se pudo cargar el contenido.</p>';
+    }
+  </script>
+</head>
+<body>
+  <div class="col">
+    <div class="rowtop">
+      <div class="navitem" onclick="loadSection('donate')">Donar</div>
+      <div class="navitem" onclick="loadSection('whowheare')">Quienes somos</div>
+      <div class="navitem" onclick="loadSection('whatwedo')">Qué hacemos</div>
+    </div>
+    <h1>CAB - Campaña Anti Basura</h1>
+    <div id="content">
+      <p>Bienvenidos a la Campaña Anti Basura. Seleccione una opción del menú.</p>
+    </div>
+  </div>
+
+ </body>
+</html>

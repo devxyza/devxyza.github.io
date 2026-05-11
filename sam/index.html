@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>808 Randomizer Pad</title>
+    <style>
+        body, html {
+            height: 100%; margin: 0; background-color: #121212;
+            display: flex; justify-content: center; align-items: center;
+            font-family: sans-serif;
+        }
+        .drum-machine { background: #222; padding: 30px; border-radius: 20px; border: 2px solid #444; }
+        .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; }
+        button {
+            width: 120px; height: 120px; border: none; border-radius: 12px;
+            font-weight: bold; cursor: pointer; transition: transform 0.05s;
+            box-shadow: 0 6px #000; color: white;
+        }
+        button:active { transform: translateY(4px); box-shadow: 0 2px #000; }
+        .kick { background: #e74c3c; }
+        .snare { background: #f39c12; }
+        .hat { background: #f1c40f; color: #333; }
+        .perc { background: #3498db; }
+        .tom { background: #9b59b6; }
+        .label { display: block; font-size: 10px; margin-top: 5px; opacity: 0.8; }
+    </style>
+</head>
+<body>
+
+<div class="drum-machine">
+    <div class="grid">
+        <button class="kick" onclick="playRandom('kick')">KICK <span class="label">(1-16)</span></button>
+        <button class="snare" onclick="playRandom('snare')">SNARE <span class="label">(1-16)</span></button>
+        <button class="hat" onclick="playRandom('hatC')">CLOSED HAT <span class="label">(1-5)</span></button>
+        <button class="hat" onclick="playRandom('hatO')">OPEN HAT <span class="label">(1-3)</span></button>
+
+        <button class="perc" onclick="playRandom('clap')">CLAP <span class="label">(1-2)</span></button>
+        <button class="perc" onclick="playRandom('tom')">TOM <span class="label">(1-7)</span></button>
+        <button class="perc" onclick="playRandom('ride')">RIDE <span class="label">(1-4)</span></button>
+        <button class="perc" onclick="playRandom('shaker')">SHAKER <span class="label">(1-2)</span></button>
+    </div>
+</div>
+
+<script>
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const cache = {};
+
+    // Map categories to your specific file naming convention
+    const library = {
+        kick: Array.from({length: 16}, (_, i) => `Kick${(i+1).toString().padStart(2, '0')}.wav`),
+        snare: Array.from({length: 16}, (_, i) => `Snare${(i+1).toString().padStart(2, '0')}.wav`),
+        hatC: Array.from({length: 5}, (_, i) => `Hat_C${(i+1).toString().padStart(2, '0')}.wav`),
+        hatO: Array.from({length: 3}, (_, i) => `Hat_O${(i+1).toString().padStart(2, '0')}.wav`),
+        clap: ['Clap01.wav', 'Clap02.wav'],
+        tom: Array.from({length: 7}, (_, i) => `Tom${(i+1).toString().padStart(2, '0')}.wav`),
+        ride: Array.from({length: 4}, (_, i) => `Ride${(i+1).toString().padStart(2, '0')}.wav`),
+        shaker: ['Shaker01.wav', 'Shaker02.wav']
+    };
+
+    async function playRandom(category) {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        
+        const files = library[category];
+        const randomFile = files[Math.floor(Math.random() * files.length)];
+
+        if (!cache[randomFile]) {
+            const response = await fetch(randomFile);
+            const buffer = await response.arrayBuffer();
+            cache[randomFile] = await audioCtx.decodeAudioData(buffer);
+        }
+
+        const source = audioCtx.createBufferSource();
+        source.buffer = cache[randomFile];
+        source.connect(audioCtx.destination);
+        source.start(0);
+    }
+</script>
+
+</body>
+</html>

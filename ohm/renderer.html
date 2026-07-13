@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Minecraft Renderer Demo (Animated Bones & Lights)</title>
+
+<style>
+body { margin: 0; overflow: hidden; background: #050505; font-family: sans-serif; user-select: none; -webkit-user-select: none; }
+canvas { display: block; position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+#ui-toggle { position: fixed; top: 12px; right: 12px; z-index: 100; background: rgba(20, 20, 20, 0.85); color: #fff; border: 1px solid #444; padding: 8px 16px; font-size: 13px; font-weight: bold; border-radius: 4px; cursor: pointer; backdrop-filter: blur(4px); transition: background 0.2s; }
+#ui-toggle:hover { background: rgba(40, 40, 40, 0.95); }
+.lil-gui { top: 55px !important; right: 12px !important; --background-color: rgba(20, 20, 20, 0.95); --text-color: #ddd; --title-background-color: #2c2c2c; --widget-color: #3c3c3c; font-size: 13px; z-index: 90 !important; max-width: 300px; }
+@media (max-width: 480px) { .lil-gui { max-width: calc(100% - 24px); width: 100%; } }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.168/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.168/examples/jsm/",
+    "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm"
+  }
+}
+</script>
+
+</head>
+
+<body>
+
+<button id="ui-toggle">⚙️ Settings</button>
+
+<script type="module">
+
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GUI } from "lil-gui";
+
+// --- Configuration State ---
+const config = {
+    showGround: true,
+    lightColor: "#ffffff",
+    sunIntensity: 2.5,
+    ambientIntensity: 0.15, // lower base level so point-light shadows actually read
+    modelSelection: "model.glb",
+    customPath: "model.glb",
+    currentAnimation: "None",
+    playAnimation: true,
+    animationSpeed: 1.0,
+    showLightProxies: true,
+    toneMappingExposure: 1.0,
+
+    // --- Point light shadow settings ---
+    // Point-light shadows are expensive: each shadow-casting point light renders
+    // the scene 6 times (once per cube face) instead of a directional/spot light's 1.
+    // These knobs let you trade fidelity for framerate.
+    enablePointShadows: true,
+    pointShadowMapSize: 512,      // 256 = cheap/blocky, 512 = balanced, 1024 = sharp/costly
+    maxShadowCastingLights: 3     // cap how many locator lights get shadows; rest still emit light, just no shadow
+};
+
+// --- Core Engine Setup ---
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); 
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.LinearToneMapping; // ACES crushed brightness too hard at these light intensities
+renderer.toneMappingExposure = config.toneMappingExposure;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(3, 2, 5);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+
+// --- Time & Animation Globals ---
+const clock = new THREE.Clock();
+let mixer = null;
+let animationClips = [];
+let activeAction = null;
+
+// Track dynamically generated lights and GUI elements
+const lightProxies = [];
+const activePointLights = []; // { light, data } for every locator light in the current model
+let anchorGuiFolders = [];
+
+// --- Lighting Setup ---
+const ambientLight = new THREE.AmbientLight(config.lightColor, config.ambientIntensity);
+scene.add(ambientLight);
+
+const sun = new THREE.DirectionalLight(config.lightColor, config.sunIntensity);
+sun.position.set(5, 8, 5);
+sun.castShadow = true;
+sun.shadow.mapSize.width = 2048;
+sun.shadow.mapSize.height = 2048;
+sun.shadow.bias = -0.0005;
+sun.shadow.normalBias = 0.02;
+sun.shadow.camera.near = 0.5;
+sun.shadow.camera.far = 30;
+sun.shadow.camera.left = -6;
+sun.shadow.camera.right = 6;
+sun.shadow.camera.top = 6;
+sun.shadow.camera.bottom = -6;
+scene.add(sun);
+
+const shadowMaterial = new THREE.ShadowMaterial({ opacity: 0.4 });
+const groundPlane = new THREE.Mesh(new THREE.PlaneGeometry(20, 20), shadowMaterial);
+groundPlane.rotation.x = -Math.PI / 2;
+groundPlane.receiveShadow = true;
+scene.add(groundPlane);
+
+// --- Asset Loader ---
+const loader = new GLTFLoader();
+let currentModel = null;
+
+// The main GUI Panel
+const gui = new GUI({ title: "Render Controls", autoPlace: true });
+const dynamicLightsFolder = gui.addFolder("Model Lights (Animated)");
+
+dynamicLightsFolder.add(config, "showLightProxies").name("Show Light Cubes").onChange(val => {
+    lightProxies.forEach(proxy => proxy.visible = val);
+});
+
+dynamicLightsFolder.add(config, "enablePointShadows").name("Enable Point Shadows (reload)").onChange(() => {
+    loadMinecraftModel(config.customPath || config.modelSelection);
+});
+
+dynamicLightsFolder.add(config, "pointShadowMapSize", { "256 (cheap)": 256, "512 (balanced)": 512, "1024 (sharp)": 1024 })
+    .name("Shadow Map Size (reload)")
+    .onChange(() => loadMinecraftModel(config.customPath || config.modelSelection));
+
+dynamicLightsFolder.add(config, "maxShadowCastingLights", 0, 8, 1)
+    .name("Max Shadow Lights (reload)")
+    .onChange(() => loadMinecraftModel(config.customPath || config.modelSelection));
+
+function setupMinecraftMaterial(mat) {
+    if (!mat) return;
+    if (mat.map) {
+        mat.map.magFilter = THREE.NearestFilter;
+        mat.map.minFilter = THREE.NearestFilter;
+        mat.map.needsUpdate = true;
+    }
+    mat.transparent = true;
+    mat.alphaTest = 0.5;
+    mat.side = THREE.DoubleSide;
+}
+
+function playSelectedAnimation(animName) {
+    if (!mixer) return;
+    mixer.stopAllAction();
+    if (animName === "None" || animationClips.length === 0) return;
+    const clip = animationClips.find(c => c.name === animName);
+    if (clip) {
+        activeAction = mixer.clipAction(clip);
+        activeAction.reset();
+        activeAction.play();
+        mixer.timeScale = config.playAnimation ? config.animationSpeed : 0;
+    }
+}
+
+function loadMinecraftModel(url) {
+    // Cleanup old model
+    if (currentModel) {
+        scene.remove(currentModel);
+        currentModel.traverse((obj) => {
+            if (obj.isMesh) {
+                obj.geometry.dispose();
+                if (Array.isArray(obj.material)) obj.material.forEach(m => { if(m.map) m.map.dispose(); m.dispose(); });
+                else { if(obj.material.map) obj.material.map.dispose(); obj.material.dispose(); }
+            }
+        });
+    }
+    
+    if (mixer) { mixer.stopAllAction(); mixer = null; }
+    animationClips = [];
+    activeAction = null;
+
+    // Cleanup old UI Folders for lights
+    anchorGuiFolders.forEach(folder => folder.destroy());
+    anchorGuiFolders = [];
+    lightProxies.length = 0;
+    activePointLights.length = 0;
+
+    let shadowCastingCount = 0; // running tally so we respect maxShadowCastingLights
+
+    loader.load(url, (gltf) => {
+        currentModel = gltf.scene;
+        
+        currentModel.traverse((obj) => {
+            // Setup Mesh Materials
+            if (obj.isMesh) {
+                obj.castShadow = true;
+                obj.receiveShadow = true;
+                if (Array.isArray(obj.material)) obj.material.forEach(setupMinecraftMaterial);
+                else setupMinecraftMaterial(obj.material);
+            }
+
+            // --- THE MAGIC: Finding Blockbench Locators AND Armature Bones ---
+            // Checks if it is an Object3D OR a Bone, ensures it is NOT a Mesh, and checks the name.
+            if ((obj.isObject3D || obj.isBone) && !obj.isMesh && obj.name.toLowerCase().startsWith("light_")) {
+                
+                const lightName = obj.name.substring(6) || "Unnamed";
+                const isBone = obj.isBone ? "(Bone)" : "(Locator)";
+                
+                // 1. Create the light
+                const pLight = new THREE.PointLight(0xffffff, 2.0, 15);
+
+                // Decide whether this light gets to cast a shadow. Each shadow-casting
+                // point light renders the scene 6x (cube map), so we cap how many are active.
+                const wantsShadow = config.enablePointShadows && shadowCastingCount < config.maxShadowCastingLights;
+                if (wantsShadow) {
+                    pLight.castShadow = true;
+                    pLight.shadow.mapSize.set(config.pointShadowMapSize, config.pointShadowMapSize);
+                    pLight.shadow.camera.near = 0.1;
+                    pLight.shadow.camera.far = pLight.distance || 15;
+                    pLight.shadow.bias = -0.003;
+                    pLight.shadow.normalBias = 0.04; // softens acne on curved/blocky geometry without peter-panning
+                    shadowCastingCount++;
+                }
+                
+                // 2. ATTACH light directly to the armature bone or locator
+                obj.add(pLight);
+                
+                // 3. Create a tiny glowing cube to show where the light is
+                const proxyGeo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
+                const proxyMat = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true });
+                const proxyMesh = new THREE.Mesh(proxyGeo, proxyMat);
+                proxyMesh.visible = config.showLightProxies;
+                
+                // 4. ATTACH the cube
+                obj.add(proxyMesh);
+                lightProxies.push(proxyMesh);
+                
+                // 5. Add it to the GUI menu
+                const lightMenu = dynamicLightsFolder.addFolder(`${lightName} ${isBone}${wantsShadow ? " 🔦" : ""}`);
+                anchorGuiFolders.push(lightMenu);
+                
+                const lData = { color: "#ffffff", intensity: 2.0, distance: 15, castShadow: wantsShadow };
+                lightMenu.addColor(lData, "color").name("Color").onChange(val => {
+                    pLight.color.set(val); proxyMat.color.set(val);
+                });
+                lightMenu.add(lData, "intensity", 0, 20, 0.1).name("Intensity").onChange(val => pLight.intensity = val);
+                lightMenu.add(lData, "distance", 1, 50, 1).name("Distance").onChange(val => {
+                    pLight.distance = val;
+                    if (pLight.castShadow) pLight.shadow.camera.far = val;
+                });
+
+                if (wantsShadow) {
+                    lightMenu.add(lData, "castShadow").name("Cast Shadow").onChange(val => {
+                        pLight.castShadow = val;
+                        // Force the shadow map to regenerate at the new setting
+                        if (pLight.shadow.map) { pLight.shadow.map.dispose(); pLight.shadow.map = null; }
+                    });
+                } else {
+                    lightMenu.add({ note: "No shadow (limit reached)" }, "note").disable();
+                }
+
+                activePointLights.push({ light: pLight, data: lData });
+            }
+        });
+
+        // Initialize Animations
+        if (gltf.animations && gltf.animations.length > 0) {
+            mixer = new THREE.AnimationMixer(currentModel);
+            animationClips = gltf.animations;
+            const animNames = animationClips.map((clip, index) => clip.name || `Animation ${index}`);
+            
+            if (animController) {
+                animController.options(animNames);
+                config.currentAnimation = animNames[0]; 
+                animController.setValue(config.currentAnimation);
+                playSelectedAnimation(config.currentAnimation); // Auto-play
+            }
+        } else {
+            if (animController) {
+                animController.options(["None"]);
+                config.currentAnimation = "None";
+                animController.setValue("None");
+            }
+        }
+
+        // Center Model
+        const box = new THREE.Box3().setFromObject(currentModel);
+        const center = box.getCenter(new THREE.Vector3());
+        currentModel.position.x += (currentModel.position.x - center.x);
+        currentModel.position.z += (currentModel.position.z - center.z);
+        
+        scene.add(currentModel);
+    }, undefined, console.error);
+}
+
+// Environment & Sun
+const environmentFolder = gui.addFolder("Environment & Sun");
+environmentFolder.add(config, "showGround").name("Ground Shadow").onChange(val => groundPlane.visible = val);
+environmentFolder.addColor(config, "lightColor").name("Global Color").onChange(val => { sun.color.set(val); ambientLight.color.set(val); });
+environmentFolder.add(config, "sunIntensity", 0, 5, 0.1).name("Sun Brightness").onChange(val => sun.intensity = val);
+environmentFolder.add(config, "ambientIntensity", 0, 1, 0.01).name("Base Light Level").onChange(val => ambientLight.intensity = val);
+environmentFolder.add(config, "toneMappingExposure", 0.1, 2.0, 0.05).name("Exposure").onChange(val => renderer.toneMappingExposure = val);
+
+// Model Controls
+const modelFolder = gui.addFolder("Model & Animation");
+modelFolder.add(config, "modelSelection", { "Default Model": "model.glb" }).name("Select Model").onChange(val => loadMinecraftModel(val));
+modelFolder.add(config, "customPath").name("Direct Path").onFinishChange(val => { if(val.trim() !== "") loadMinecraftModel(val); });
+
+const animController = modelFolder.add(config, "currentAnimation", ["None"]).name("Active Anim").onChange(val => playSelectedAnimation(val));
+modelFolder.add(config, "playAnimation").name("Play / Pause").onChange(val => { if (mixer) mixer.timeScale = val ? config.animationSpeed : 0; });
+modelFolder.add(config, "animationSpeed", 0.1, 3.0, 0.1).name("Anim Speed").onChange(val => { if (mixer && config.playAnimation) mixer.timeScale = val; });
+
+// Trigger Initial Load
+loadMinecraftModel("model.glb");
+
+// Hide/Show UI
+const toggleBtn = document.getElementById("ui-toggle");
+let isGuiVisible = true;
+toggleBtn.addEventListener("click", () => {
+    isGuiVisible ? gui.hide() : gui.show();
+    toggleBtn.innerText = isGuiVisible ? "⚙️ Settings" : "❌ Close";
+    isGuiVisible = !isGuiVisible;
+});
+
+// Render Loop
+renderer.setAnimationLoop(() => {
+    controls.update();
+    const delta = clock.getDelta();
+    if (mixer) mixer.update(delta);
+    renderer.render(scene, camera);
+});
+
+// Resizing
+window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+</script>
+</body>
+</html>
